@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity >=0.7.0 <0.9.0;
 
+import "./CommitReveal.sol";
 import "./TimeUnit.sol";
 
 contract RPS {
-    TimeUnit public timeUnit = new TimeUnit();
+
+    TimeUnit public timeUnit;
+    CommitReveal public commitReveal;
 
     address public constant ADDRESS_1 = 0x5B38Da6a701c568545dCfcB03FcB875f56beddC4;
     address public constant ADDRESS_2 = 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2;
@@ -14,10 +17,18 @@ contract RPS {
 
     uint public numPlayer = 0;
     uint public reward = 0;
+    uint public numCommit = 0;
+    uint public numReveal = 0;
+
     mapping (address => uint) public player_choice; // 0 - Rock, 1 - Spock, 2 - Paper, 3 - Lizard, 4 - Scissors
     mapping (address => bool) public player_not_played;
+
     address[] public players;
-    uint public numInput = 0;
+
+    constructor(address _timeUnit, address _commitReveal) {
+        timeUnit = TimeUnit(_timeUnit);
+        commitReveal = CommitReveal(_commitReveal);
+    }
 
     modifier onlyValidAddress() {
         require(
@@ -42,29 +53,52 @@ contract RPS {
         numPlayer++;
     }
 
-    function input(uint choice) public onlyValidAddress {
+    function getHash(bytes32 data) public view returns (bytes32) {
+        bytes1 lastByte = bytes1(data[31]);
+        require(lastByte == 0x00 || lastByte == 0x01 || lastByte == 0x02 || lastByte == 0x03 || lastByte == 0x04, "Invalid choice");       
+        return commitReveal.getHash(data);
+    }
+
+    function playerCommit(bytes32 dataHash) public {
         require(numPlayer == 2, "Must have 2 players before playing");
         require(player_not_played[msg.sender], "You have already selected");
-        require(choice == 0 || choice == 1 || choice == 2 || choice == 3 || choice == 4, "Invalid choice");
-        player_choice[msg.sender] = choice;
+        numCommit++;
         player_not_played[msg.sender] = false;
-        numInput++;
-        if (numInput == 1) {
-            timeUnit.setStartTime();
-        }
-        if (numInput == 2) {
+        commitReveal.commit(msg.sender, dataHash);
+        timeUnit.setStartTime();
+    }
+
+    function getPlayerCommit(address player) public view returns (bytes32, uint64, bool) {
+        return commitReveal.commits(player);
+    }
+
+    function playerReveal(bytes32 revealHash) public {
+        require(numCommit == 2, "2 players must have commited first");
+        commitReveal.reveal(msg.sender, revealHash);
+        uint choice = uint8(revealHash[31]);
+        player_choice[msg.sender] = choice;
+        numReveal++;
+        timeUnit.setStartTime();
+        if (numReveal == 2) {
             _checkWinnerAndPay();
         }
     }
 
-    function refund() public {
+    function getElaspedSeconds() public view returns (uint256) {
+        return timeUnit.elapsedSeconds();
+    }
+
+    function exit() public {
         require(player_not_played[msg.sender] == false, "You must select the action first");
-        require(timeUnit.elapsedMinutes() >= 1, "You must wait for at least 1 minute to refund");
-
+        require(timeUnit.elapsedMinutes() >= 1, "You must wait for at least 1 minute to exit from the contract");
+        if (numCommit == 2) {
+            require(numReveal == 1, "You must have revealed first");
+        }
+        
         address payable account0 = payable(msg.sender);
-        account0.transfer(reward / 2);
+        account0.transfer(reward);
 
-        _playerRefund(msg.sender);
+        _resetState();
     }
 
     function _checkWinnerAndPay() private {
@@ -89,8 +123,9 @@ contract RPS {
     }
 
     function _resetState() private {
-        numPlayer = 0;
-        numInput = 0; 
+        numPlayer = 0;     
+        numCommit = 0;
+        numReveal = 0;
         reward = 0;
 
         for (uint i = 0 ; i < players.length ; i++) {
@@ -99,18 +134,5 @@ contract RPS {
         }
 
         delete players;
-    }
-
-    function _playerRefund(address sender) private {
-        numPlayer --;
-        numInput--;
-        reward /= 2;
-        player_not_played[sender] = false;
-        player_choice[sender] = 0;
-
-        if (players[0] == sender) {
-            players[0] = players[1];
-        }
-        players.pop();
     }
 }
